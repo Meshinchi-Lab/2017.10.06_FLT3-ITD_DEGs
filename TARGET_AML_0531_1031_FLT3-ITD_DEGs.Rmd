@@ -1,0 +1,1036 @@
+---
+title: "FLT3-ITD RNAseq"
+author: "Jenny Smith"
+date: "October 6, 2017"
+output: html_document
+---
+
+
+```{r setup}
+library(knitr)
+knitr::opts_chunk$set(tidy.opts=list(width.cutoff=50),tidy=TRUE, fig.align='center', fig.height = 10, fig.width = 10)
+knitr::opts_knit$set(root.dir = '~/RNA_seq_Analysis/2017.10.06_FLT3-ITD_DEGs')
+```
+
+
+```{r message=FALSE}
+library(dplyr)
+library(magrittr)
+library(ggplot2)
+library(stringr)
+library(reshape2)
+library(venn)
+library(tibble)
+library(tidyr)
+getwd()
+```
+
+
+
+```{r}
+source("~/scripts/RNAseq_Analysis/DifferentialExpn_PathwayAnalysis/DifferentialExpressionPipeline.r")
+source("~/scripts/RNAseq_Analysis/DifferentialExpn_PathwayAnalysis/rmDupGenes_Function.r")
+source("~/scripts/RNAseq_Analysis/DifferentialExpn_PathwayAnalysis/Heatmaps_Function.r")
+source("~/scripts/RNAseq_Analysis/DifferentialExpn_PathwayAnalysis/ggplot_Themes_Function.r")
+# source("~/scripts/RNAseq_Analysis/DifferentialExpn_PathwayAnalysis/ggplot_Themes_Function.r")
+```
+
+
+
+#Define Functions to be Used
+
+```{r}
+matchIDs <- function(ID, type, idMap){
+  
+  if (type == "reg"){
+    match <- idMap[grepl(ID, idMap$Reg.),]
+    USI <- unique(match$USI)
+    return(USI)
+  }else if (type == "USI"){
+    match <- idMap[grepl(ID, idMap$USI),]
+    Reg <- unique(match$Reg.)
+    return(Reg)
+  }
+}
+```
+
+
+```{r}
+formatDEGs <- function(twoGroups_DEGs.res, goi=NULL,filter=FALSE){
+  DE <- twoGroups_DEGs.res$DE$DE
+  
+  DE <- DE %>% 
+      mutate(gene=rownames(.)) %>%
+      arrange(desc(logFC)) %>%
+      select(gene, everything())
+  
+  if (filter){
+    DE <- DE %>%
+      filter(gene %in% goi)
+  }
+  
+  return(DE)
+}
+```
+
+
+#Read in the Clinical Data for 0531
+
+```{r}
+FLT3 <- read.csv("Hamid for comparison.csv", stringsAsFactors = FALSE) %>% 
+  mutate(ITD.Failure.Status=ifelse(Comparison...A.no.event..B..Event. == "", "Unknown", Comparison...A.no.event..B..Event.)) %>%
+  set_rownames(.$TARGET.USI)
+
+head(FLT3[,1:5])
+```
+
+
+```{r}
+dim(FLT3) #152 FLT3 ITDs
+```
+
+
+```{r}
+CDE.0531 <- read.csv("~/reference_mapping-files/TARGET_AML_current_asof_june30_2016_UPDATED_RhondaEdit_2017.06.08.csv", stringsAsFactors = FALSE, row.names = 1)
+dim(CDE.0531)
+```
+
+```{r}
+CDE.0531 <- CDE.0531 %>% 
+  mutate(FLT3.With.Event=paste(FLT3.ITD.positive., Event.ID, sep="."),
+         NUP98.NSD1=ifelse(grepl("NUP98-NSD1", Known.Fusions), "NUP98-NSD1", "otherAML"),
+         NUP98.KDM5A=ifelse(grepl("NUP98-KDM5A", Known.Fusions), "NUP98-KDM5A", "otherAML")) %>%
+  set_rownames(.$TARGET.USI.1)
+
+head(CDE.0531[,1:5])
+```
+
+
+#Read in the clinical Data for 1031
+
+```{r}
+CDE.1031 <- read.csv("~/reference_mapping-files/TARGET_AML_AAML1031_merged_CDE_Cleaned_28Sept2017.csv", stringsAsFactors = FALSE)
+dim(CDE.1031)
+```
+
+```{r}
+# itd <- read.csv("ITDpos_Cleaned_10.11.2017.csv", stringsAsFactors = FALSE)
+itd <- read.csv("ITDpos_Cleaned_withMolecularAdded_10.24.2017.csv")
+head(itd[,1:5])
+# dim(itd) #210, and 92 
+```
+
+NOTE: Used a more updated ITDpos spreadsheet on 10.25.17. 
+
+
+```{r}
+idMap <- read.csv("AAML1031_Reg_USI_conversion_for_miRNA_seq.csv", stringsAsFactors = FALSE)
+head(idMap)
+```
+
+
+#Clean the 1031 CDE
+
+
+```{r}
+cols1 <- c("Patient.ID",
+           "USI", 
+           "FLT3.ITD", 
+           "efsi", 
+           "Treatment.Arm",
+           "NPM1", 
+           "CEBPA",
+           "NUP98.NSD1", 
+           "Karyotype")
+
+cols2 <- c("Patient.registration.number",
+           "USI",
+           "FLT3.results",
+           "First.Event",
+           "Treatment.Arm",
+           "NPM1",
+           "CEBPA",
+           "NUP98.NSD1",
+           "Karyotype")
+
+#Select the columns of interest (FLT3-ITD and Event Status)
+df1 <- CDE.1031 %>%
+  mutate(NUP98.NSD1=rep("unknown", nrow(.))) %>% #place holder
+  select_(.dots=cols1) %>%
+  mutate(Events=ifelse(efsi == 1, "Yes", "No"))
+
+df2 <- itd %>% 
+  select_(.dots=cols2) %>%
+  set_colnames(cols1) %>%
+  mutate(Events=ifelse(efsi == 1, "Present", "Absent")) 
+  
+
+#Combine the two subsets of 1031 
+combined.CDE.1031 <- rbind(df1, df2) %>%
+filter(! is.na(efsi)) %>%
+mutate(FLT3.ITD.Status=ifelse(FLT3.ITD == "Wild-type", "No", "Yes"),
+       USI=ifelse(grepl("#", USI), NA, USI)) %>%
+filter(! is.na(USI))
+
+# combined.CDE.1031 <- rbind(df1, df2) %>%
+#   filter(! duplicated(USI) & ! is.na(USI)) %>%
+#   filter(! is.na(efsi)) #666
+
+
+dim(combined.CDE.1031) #841
+```
+
+
+To note: 894 NAs in Event Status and  381 NAs in USI between the two datasets. 
+
+The Reg numbers without USIs appear to have no mappable USI, and therefore are not included in the RNAseq data. That is why the filter for is.na(USI) was used. 
+
+
+```{r}
+d <- combined.CDE.1031$USI[duplicated(combined.CDE.1031$USI)]
+
+#For loop to select the duplicate entry to retain. 
+toKeep <- as.numeric()
+for (dup in d){
+    i <- grepl(dup, combined.CDE.1031$USI)
+    tmp <- combined.CDE.1031[i,]
+    
+    #update the NUP98.NSD1 column to have identical info.
+    if (any(grepl("negative|positive", tmp["NUP98.NSD1"]))){
+      status <- grep("negative|positive", tmp[,"NUP98.NSD1"], value=TRUE)
+      tmp["NUP98.NSD1"] <- status
+    }
+    
+    sel <- grepl("Yes|No", tmp[,"Events"]) #select the entry from the 666 CDE (more information content)
+    final <- as.numeric(rownames(tmp[sel,]))
+    toKeep <- c(toKeep, final)
+}
+```
+
+         Cytogenetic.test.result.=gsub(";", "",Cytogenetic.test.result.))
+```{r}
+combined.CDE.1031 <- combined.CDE.1031 %>%
+  filter(! USI %in% d) %>%
+  rbind(., combined.CDE.1031[toKeep,]) %>%
+  mutate(Events=ifelse(Events == "Absent", "No", ifelse(Events == "No", "No", "Yes")),
+         FLT3.With.Event=paste(FLT3.ITD.Status, efsi, sep=".")) %>%
+  set_rownames(.$USI)
+
+dim(combined.CDE.1031) #797 patients
+```
+
+```{r}
+# write.csv(combined.CDE.1031, "AAML1031_Combined_CDE_ITDpos_Cleaned_10.30.2017.csv")
+```
+
+
+
+#Read in the Counts 
+
+Raw counts with Dup genes removed. Dups selected to have highest variation. 
+
+```{r}
+cts.0531 <- read.csv("ExpressionData/TARGET_AML_AAML0531_dupsRemoved_fractionalCounts.csv", stringsAsFactors = FALSE, row.names = 1)
+
+head(cts.0531[,1:5])
+```
+
+```{r}
+dim(cts.0531)
+```
+
+
+```{r}
+cts.1031 <- read.csv("ExpressionData/TARGET_AML_AAML1031_dupGenesRemoved_FractionalCounts.csv", row.names = 1, stringsAsFactors = FALSE)
+
+colnames(cts.1031) <- str_split_fixed(colnames(cts.1031), pattern = "\\.", n=2)[,1]
+
+head(cts.1031[,1:5])
+```
+
+
+```{r}
+dim(cts.1031)
+```
+
+
+
+# AAML0531 Perform Differential Expression Failure Vs No-Failure FLT3-ITDs 
+
+```{r}
+ITD.withEvent.NoEvent <- CDE.0531 %>%
+  filter(grepl("Yes", FLT3.With.Event)) %>%
+  set_rownames(.$TARGET.USI.1)
+
+```
+
+
+```{r message=FALSE}
+ITDFailvsNoFail <- twoGroups_DEGs(expnData = cts.0531,
+                    clinData = ITD.withEvent.NoEvent,
+                    col="FLT3.With.Event", 
+                    ref="Yes.0") 
+
+summary(ITDFailvsNoFail)
+```
+
+```{r}
+table(ITDFailvsNoFail$InputClinData$FLT3.With.Event)
+```
+
+
+```{r}
+dim(ITDFailvsNoFail$DE$dge) #16,916 genes with expression > 1 CPM in 5% of AML Samples
+```
+
+Results: No Difference in the expression profiles. 
+
+```{r}
+ITDFailvsNoFail$PCA$pca_plot
+```
+
+
+
+#AAML1031 FLT3-ITD Fail vs No Fail 
+
+
+```{r}
+itd.with.fail <- combined.CDE.1031 %>%
+  filter(FLT3.ITD.Status == "Yes") %>%
+  set_rownames(.$USI)
+
+sum(itd.with.fail$USI %in% colnames(cts.1031)) #167 FLT3-ITD+ Samples in the RNA-seq Data set 
+```
+
+
+```{r message=FALSE}
+# pdf(file="TARGET_AML_1031_ITD.Event_vs_ITD.NoEvent_Heatmap.pdf")
+ITD.1031.FailvsNoFail <- twoGroups_DEGs(expnData = cts.1031,
+                                        clinData = itd.with.fail, 
+                                        col = "Events", 
+                                        ref = "No")
+
+# dev.off()
+summary(ITD.1031.FailvsNoFail)
+```
+
+```{r}
+table(ITD.1031.FailvsNoFail$InputClinData$FLT3.With.Event)
+```
+
+```{r}
+dim(ITD.1031.FailvsNoFail$DE$dge) #18,863 genes with 1 CPM in at least 5% of AML 
+```
+
+
+```{r}
+itd.EvN <- formatDEGs(ITD.1031.FailvsNoFail)
+
+dim(itd.EvN) #49 Differentially expressed Genes 
+# write.csv(itd.EvN, "TARGET_AML_1031_ITD.Event_vs_ITD.NoEvent_DEGs.csv", row.names = FALSE)
+```
+
+
+Results: Small difference between ITD with and withou and event. Only 49 DEGs with adjusted p-values that are just under 0.05 sig level. 
+
+```{r}
+ITD.1031.FailvsNoFail$PCA$pca_plot
+```
+
+
+
+
+#Boxplots of the 49 "ITD+ With Event" DEGS
+
+To ensure the expression is both fairely high and different. 
+
+
+```{r}
+g <- itd.EvN$gene
+gup <- subset(itd.EvN, logFC > 0)$gene
+gdn <- subset(itd.EvN, logFC < 0)$gene
+ITD.withEvent <- names(ITD.1031.FailvsNoFail$phenovector[ITD.1031.FailvsNoFail$phenovector == "GroupA"])
+
+#log2 CPM values 
+ITD.withEvent.cpm <- ITD.1031.FailvsNoFail$DE$dge[g,] %>%
+  melt() %>%
+  set_colnames(c("Gene", "USI", "Log2CPM")) %>%
+  mutate(Gene=as.character(Gene),
+         Group=ifelse(USI %in% ITD.withEvent, "ITD+,Event", "ITD+,No Event")) 
+  
+#upregulated
+ITD.pos.up <- ITD.withEvent.cpm %>%
+  filter(Gene %in% gup) %>%
+  arrange(Gene)
+
+#downregulated
+ITD.pos.dn <- ITD.withEvent.cpm %>%
+  filter(Gene %in% gdn) %>%
+  arrange(Gene)
+
+head(ITD.pos.up)
+```
+
+
+```{r fig.width=16, fig.height=10}
+upBoxplots <- ggplot(ITD.pos.up, aes(x=Group, y=Log2CPM, fill=Group)) + 
+  geom_boxplot(color="azure4") + 
+  labs(y="Log2 CPM", x="") +
+  scale_fill_manual(values = c("ITD+,Event"="firebrick", "ITD+,No Event"="black")) + 
+  theme_bw() +
+  theme(legend.position = 'none',
+        axis.text.x = element_text(size=9, face = "bold"),
+        axis.text.y = element_text(size=10)) + 
+  facet_wrap(~ Gene, nrow=5,ncol=7, scale="free_y")
+
+# ggsave(filename = "TARGET_AML_1031_FLT3-ITD.Event_vs_FLT3-ITD.NoEvent_Boxplots.pdf", plot = upBoxplots, device = "pdf", units = "in", height = 10, width = 16)
+```
+
+```{r}
+quantile(ITD.1031.FailvsNoFail$DE$dge["MN1",]) #upper 50% express >= 14.5 CPM.  
+```
+
+Investigate CIITA?
+https://www.nature.com/nature/journal/v471/n7338/full/nature09754.html
+
+MN1?
+https://www.ncbi.nlm.nih.gov/pubmed/21741595
+https://www.ncbi.nlm.nih.gov/pmc/articles/PMC3951989/
+http://www.nature.com/onc/journal/v26/n39/full/1210382a.html?foxtrotcallback=true
+
+
+
+
+#0531 ITD with Event Compared to other AML with Event
+
+This comparison is for ITD+ with Events and comparing to other AMLs (No ITD) with Events. 
+In this case that would be "No.1" which at FLT3-ITD- and had an event (1) versus "Yes.1", which are ITD+ and had and event. 
+
+```{r}
+ITD.withEvent.OtherAML <- CDE.0531 %>% 
+  filter(grepl("No.1|Yes.1", FLT3.With.Event)) %>% 
+  set_rownames(.$TARGET.USI.1)
+dim(ITD.withEvent.OtherAML)
+```
+
+```{r message=FALSE}
+# pdf(file = "TARGET_AML_0531_ITD.Event_vs_NoITD.Event_Heatmap.pdf")
+ITDvsOtherAML <- twoGroups_DEGs(expnData = cts.0531, 
+                                 clinData = ITD.withEvent.OtherAML, 
+                                 col="FLT3.With.Event",
+                                 ref="No.1")
+# dev.off()
+summary(ITDvsOtherAML)
+```
+
+```{r}
+table(ITDvsOtherAML$InputClinData$FLT3.With.Event) #229 total patients w/ RNA-seq 
+```
+
+
+```{r}
+dim(ITDvsOtherAML$DE$dge) #17,805 genes included in analysis
+```
+
+
+```{r}
+t <- formatDEGs(ITDvsOtherAML)
+# dim(t) #1,446
+head(t)
+# write.csv(t, "TARGET_AML_0531_ITD.Event_vs_NoITD.Event_DEGs.csv", row.names = FALSE)
+```
+
+```{r}
+# pdf(file="TARGET_AML_0531_ITD.Event_vs_NoITD.Event_MDS.pdf")
+ITDvsOtherAML$MDS$plot 
+# dev.off()
+```
+
+
+```{r}
+# pdf(file="TARGET_AML_0531_ITD.Event_vs_NoITD.Event_PCA.pdf")
+ITDvsOtherAML$PCA$pca_plot
+# dev.off()
+```
+
+
+#1031 ITD with Event Compared to other AML with Event
+
+```{r}
+ITD.1031withEvent.OtherAML <- combined.CDE.1031 %>%
+  filter(grepl("No.1|Yes.1", FLT3.With.Event)) %>%
+  set_rownames(.$USI)
+dim(ITD.1031withEvent.OtherAML) #410 patients
+```
+
+```{r}
+# pdf("TARGET_AML_1031_ITD.Event_vs_NoITD.Event_Heatmap.pdf")
+ITD.1031vsOtherAML <- twoGroups_DEGs(expnData = cts.1031,
+                                     clinData = ITD.1031withEvent.OtherAML, 
+                                     col="FLT3.With.Event", 
+                                     ref = "No.1")
+# dev.off()
+summary(ITD.1031vsOtherAML)
+```
+
+```{r}
+table(ITD.1031vsOtherAML$InputClinData$FLT3.With.Event) #395 patients w/ RNA-seq
+dim(ITD.1031vsOtherAML$DE$dge) #19,902 genes included. 
+```
+
+```{r}
+t2 <- formatDEGs(ITD.1031vsOtherAML)
+
+# dim(t2) #1,829 DEGs
+head(t2)
+# write.csv(t2, "TARGET_AML_1031_ITD.Event_vs_NoITD.Event_DEGs.csv", row.names = FALSE)
+```
+
+
+```{r}
+# pdf("TARGET_AML_1031_ITD.Event_vs_NoITD.Event_MDS.pdf")
+ITD.1031vsOtherAML$MDS$plot
+# dev.off()
+```
+
+
+```{r}
+# pdf("TARGET_AML_1031_ITD.Event_vs_NoITD.Event_PCA.pdf")
+ITD.1031vsOtherAML$PCA$pca_plot
+# dev.off()
+```
+
+
+
+#0531 ITD without Event Compared to No ITD with an Event 
+
+Will be used to "substract out" the ITD signature between the previous comparison. 
+
+```{r}
+ITD.NoEvent.OtherAML <- CDE.0531 %>% 
+  filter(grepl("No.1|Yes.0", FLT3.With.Event)) %>% 
+  set_rownames(.$TARGET.USI.1)
+dim(ITD.NoEvent.OtherAML) #455 patietns
+```
+
+
+```{r}
+# pdf("TARGET_AML_0531_ITD.NoEvent_vs_NoITD.Event_Heatmap.pdf")
+ITDNoEventvsOtherAML <- twoGroups_DEGs(expnData = cts.0531,
+                                       clinData = ITD.NoEvent.OtherAML,
+                                       col="FLT3.With.Event", 
+                                       ref="No.1")
+# dev.off()
+summary(ITDNoEventvsOtherAML)
+```
+
+
+```{r}
+table(ITDNoEventvsOtherAML$InputClinData$FLT3.With.Event) #189 1/ RNAseq
+dim(ITDNoEventvsOtherAML$DE$dge) #17,991 genes included 
+```
+
+
+```{r}
+t3 <- formatDEGs(ITDNoEventvsOtherAML)
+
+# dim(t3) #579 DEGs
+head(t3)
+# write.csv(t3, "TARGET_AML_0531_ITD.NoEvent_vs_NoITD.Event_DEGs.csv")
+```
+
+
+
+#1031 ITD without Event Compared to No ITD with an Event 
+
+```{r}
+ITD.1031NoEvent.OtherAML <- combined.CDE.1031 %>%
+  filter(grepl("No.1|Yes.0", FLT3.With.Event)) %>%
+  set_rownames(.$USI)
+
+dim(ITD.1031NoEvent.OtherAML) #430 patients
+```
+
+
+```{r message=FALSE}
+# pdf("TARGET_AML_1031_ITD.NoEvent_vs_NoITD.Event_Heatmap.pdf")
+ITD.1031NoEventvsOtherAML <- twoGroups_DEGs(expnData = cts.1031, 
+                                            clinData = ITD.1031NoEvent.OtherAML, 
+                                            col="FLT3.With.Event", 
+                                            ref="No.1")
+# dev.off()
+summary(ITD.1031NoEventvsOtherAML)
+```
+
+
+```{r}
+table(ITD.1031NoEventvsOtherAML$InputClinData$FLT3.With.Event) #410 w/ RNAseq
+dim(ITD.1031NoEventvsOtherAML$DE$dge)#19,793 genes included 
+```
+
+
+```{r}
+t4 <- formatDEGs(ITD.1031NoEventvsOtherAML)
+# dim(t4) #1,282 DEGS
+head(t4)
+# write.csv(t4, "TARGET_AML_1031_ITD.NoEvent_vs_NoITD.Event_DEGs.csv")
+```
+
+
+```{r}
+ITD.1031NoEventvsOtherAML$MDS$plot
+```
+
+
+```{r}
+ITD.1031NoEventvsOtherAML$PCA$pca_plot
+```
+
+
+#Compare and Constrast DEGs between ITD+ with Events
+
+```{r}
+ITD.1.vs.OtherAML.0531 <- ITDvsOtherAML$DE$DE %>% rownames() #t
+ITD.0.vs.OtherAML.0531 <- ITDNoEventvsOtherAML$DE$DE %>% rownames() #3
+
+ITD.1.vs.OtherAML.1031 <- ITD.1031vsOtherAML$DE$DE %>% rownames() #t2
+ITD.0.vs.OtherAML.1031 <- ITD.1031NoEventvsOtherAML$DE$DE %>% rownames() #t4 
+```
+
+
+```{r}
+ITD.1.Only.0531 <- setdiff(ITD.1.vs.OtherAML.0531, ITD.0.vs.OtherAML.0531) #1,009 genes
+ITD.1.Only.1031 <- setdiff(ITD.1.vs.OtherAML.1031, ITD.0.vs.OtherAML.1031) #873 genes 
+```
+
+
+```{r}
+ITD.1.BothDataSets <- intersect(ITD.1.Only.0531, ITD.1.Only.1031) #270 genes 
+```
+
+
+```{r}
+forVenn <- list(Yes.1.0531=ITD.1.vs.OtherAML.0531,
+                Yes.1.1031=ITD.1.vs.OtherAML.1031,
+                Yes.0.0531=ITD.0.vs.OtherAML.0531,
+                Yes.0.1031=ITD.0.vs.OtherAML.1031)
+
+```
+
+```{r}
+# tiff("Venn_0531_Yes_No.tiff",height = 10,width = 10, units="in", res=600)
+venn::venn(list(Yes.1.0531=ITD.1.vs.OtherAML.0531,Yes.0.0531=ITD.0.vs.OtherAML.0531), 
+           zcolor = c("cornflowerblue", "orchid"),
+           cexil = 3, cexsn = 4) 
+# dev.off()
+
+# tiff("Venn_1031_Yes_No.tiff",height = 10,width = 10, units="in", res=600)
+venn::venn(list(Yes.1.1031=ITD.1.vs.OtherAML.1031,Yes.0.1031=ITD.0.vs.OtherAML.1031),
+    zcolor = c("cornflowerblue", "orchid"),
+     cexil = 3, cexsn = 4)
+# dev.off()
+```
+
+```{r}
+# tiff("Venn_0531_1031_Yes_No.tiff",height = 10,width = 10, units="in", res=600)
+
+venn::venn(forVenn,
+     zcolor = c("cornflowerblue", "orchid"),
+     cexil = 3, cexsn = 1.8)
+# dev.off()
+```
+
+
+```{r}
+DEGs.0531 <- subset(t, gene %in% ITD.1.BothDataSets) %>% 
+  arrange(gene)
+DEGs.1031 <- subset(t2, gene %in% ITD.1.BothDataSets) %>% 
+  arrange(gene)
+
+# write.csv(DEGs.0531, "TARGET_AML_0531_ITD.WithEvent_DEGs_Common.csv", row.names = FALSE)
+# write.csv(DEGs.1031, "TARGET_AML_1031_ITD.WithEvent_DEGs_Common.csv", row.names = FALSE)
+```
+
+
+
+
+#Annotation Heatmap
+
+```{r}
+#CDE
+CDE.forHeatmap <- CDE.0531[CDE.0531$TARGET.USI.1 %in% colnames(cts.0531), ]
+CDE.forHeatmap <- subset(CDE.forHeatmap, ! grepl("Unknown|No.0",FLT3.With.Event))
+
+#Counts
+ctsForHeatmap <- cts.0531[,colnames(cts.0531) %in% CDE.forHeatmap$TARGET.USI.1]
+
+#Genes and annotations
+genes <- ITD.1.BothDataSets %>% .[! grepl("PCDH",.)]
+fusions.0531 <- c("NPM.mutation","CEBPA.mutation","WT1.mutation","NUP98.NSD1","FLT3.With.Event")
+
+
+#Colors 
+colors.0531 <- list(NPM.mutation=c("No"="turquoise3","Unknown"="yellow", "Yes"="blue"),
+                    CEBPA.mutation=c("No"="darkblue","Unknown"="seagreen2","Yes"="orchid"),
+                    WT1.mutation=c("No"="maroon", "Yes"="cornflowerblue", "Unknown"="azure4"),
+                    NUP98.NSD1=c("otherAML"="darkmagenta","NUP98-NSD1"="navajowhite2"),
+                    FLT3.With.Event=c("No.1"="saddlebrown", "Yes.1"="deepskyblue1", "Yes.0"="green4"))
+
+
+#Heatmap and dendrograms
+# tiff("0531_ITD.EventvsOtherAML_Heatmap.tiff", height = 10,width = 10, res=600, units="in")
+heatmap.0531 <- aHeatmap_custom(CDE = CDE.forHeatmap,
+                                cols=fusions.0531,
+                                annocolors = colors.0531,
+                                cts=ctsForHeatmap,
+                                geneList = genes)
+# dev.off()
+```
+
+```{r}
+#CDE
+CDE.1031forHeatmap <- combined.CDE.1031[combined.CDE.1031$USI %in% colnames(cts.1031),]
+CDE.1031forHeatmap <- subset(CDE.1031forHeatmap, FLT3.With.Event != "No.0")
+
+#Counts
+cts.1031ForHeatmap <- cts.1031[,colnames(cts.1031) %in% CDE.1031forHeatmap$USI] 
+
+#Genes and Annotations
+genes <- ITD.1.BothDataSets %>% .[! grepl("PCDH",.)]
+cols <- c("NPM1", "CEBPA","NUP98.NSD1","FLT3.With.Event")
+
+#Colors
+colors.1031 <- list(NPM1=c("Negative"="turquoise3", "Positive"="blue"),
+                    CEBPA=c("Negative"="darkblue","Positive"="orchid"),
+                    NUP98.NSD1=c("negative"="darkmagenta","positive"="navajowhite2","unknown"="azure4"),
+                    FLT3.With.Event=c("No.1"="saddlebrown", "Yes.1"="deepskyblue1", "Yes.0"="green4"))
+
+#Heatmap
+# tiff("1031_ITD.EventvsOtherAML_Heatmap.tiff", height = 10,width = 10, res=600, units="in")
+heatmap.1031 <- aHeatmap_custom(CDE = CDE.1031forHeatmap,
+                                cols=cols,
+                                annocolors = colors.1031,
+                                cts=cts.1031ForHeatmap,
+                                geneList = genes)
+
+# dev.off()
+```
+
+
+
+```{r}
+cor(DEGs.0531$logFC, DEGs.1031$logFC, method = "pearson")
+# cor(DEGs.0531$logFC, DEGs.1031$logFC, method = "spearman")
+# cor(DEGs.0531$logFC, DEGs.1031$logFC, method = "kendall")
+```
+
+
+
+There is not much of a strong correlation between the FCs of the 270 genes in common... Though the pearson and R2 show high concordance, it breaks down when seperated by  up and down regulated genes. 
+
+Actually, on second thought, the order is changed when plotting a scatter plot and each pair of (x,y) points are plotted based on where they fall on the number line, not pairs for a gene (x,y). Because each x and y correspond to a specific gene this could be why the correlation is much higher. So instead a correlation plot might be better for the genes with highest FC. 
+
+
+
+#0531 ITD with Event Compared to NBM
+
+```{r}
+basename0531 <- "TARGET_AML_0531_ITD.Event_vs_NormalBM"
+basename1031 <- "TARGET_AML_1031_ITD.Event_vs_NornalBM"
+```
+
+
+```{r message=FALSE}
+# pdf(file=paste0(basename0531, "_Heatmap.pdf"))
+ITDvsNBM <- twoGroups_DEGs(expnData=cts.0531, 
+                            clinData=ITD.withEvent.OtherAML, 
+                            col = "FLT3.With.Event",
+                            ref="No.1", 
+                            BM=TRUE)
+# dev.off()
+summary(ITDvsNBM)
+```
+
+```{r}
+b1 <- extract_DEGs(ITDvsNBM)
+
+dim(b1) #5,095
+```
+
+#1031 ITD with Event Compared to NBM 
+
+```{r message=FALSE}
+# pdf(file=paste0(basename1031, "_Heatmap.pdf"))
+ITD.1031vsNBM <- twoGroups_DEGs(expnData = cts.1031,
+                                clinData = ITD.1031withEvent.OtherAML,
+                                col="FLT3.With.Event",
+                                ref="No.1",
+                                BM=TRUE)
+# dev.off()
+summary(ITD.1031vsNBM)
+```
+
+
+```{r}
+b2 <- extract_DEGs(ITD.1031vsNBM)
+
+dim(b2) #5,298
+```
+
+
+#0531 ITD without Event Compared to NBM
+
+```{r message=FALSE}
+# pdf(file = paste0(gsub("Event_", "NoEvent_", basename0531), "_Heatmap.pdf"))
+ITD.NoEventvsNBM <- twoGroups_DEGs(expnData = cts.0531,
+                                   clinData = ITD.NoEvent.OtherAML,
+                                   col="FLT3.With.Event",
+                                   ref="No.1",
+                                   BM=TRUE)
+
+# dev.off()
+summary(ITD.NoEventvsNBM)
+```
+
+
+```{r}
+b3 <- extract_DEGs(ITD.NoEventvsNBM)
+
+dim(b3) #5,403
+```
+
+
+#1031 ITD without Event Compared to NBM 
+
+```{r message=FALSE}
+# pdf(file = paste0(gsub("Event_", "NoEvent_", basename1031), "_Heatmap.pdf"))
+ITD.1031NoEventvsNBM <- twoGroups_DEGs(expnData = cts.1031,
+                                       clinData = ITD.1031NoEvent.OtherAML,
+                                       col="FLT3.With.Event",
+                                       ref="No.1",
+                                       BM=TRUE)
+
+# dev.off()
+summary(ITD.1031NoEventvsNBM)
+```
+
+
+```{r}
+b4 <- extract_DEGs(ITD.1031NoEventvsNBM)
+
+dim(b4) #5,430
+```
+
+
+#Subtract out DEGs for ITD without Events in NBM Comparisons
+
+
+```{r}
+ITD.1.vs.NBM.0531 <- ITDvsNBM$DE$DE %>% rownames() #5,095
+ITD.0.vs.NBM.0531 <- ITD.NoEventvsNBM$DE$DE %>% rownames() #5,403 
+
+# tiff("Yes.1vsYes.0_vsNormalBM_venn.tiff", height = 6, width = 6, units = "in", res=600)
+venn::venn(list(Yes.1.0531=ITD.1.vs.NBM.0531,Yes.0.0531=ITD.0.vs.NBM.0531),
+     zcolor = c("cornflowerblue", "orchid"),
+     cexil = 3, cexsn = 1.8)
+# dev.off()
+
+
+ITD.1.vs.NBM.1031 <- ITD.1031vsNBM$DE$DE %>% rownames() #5,298
+ITD.0.vs.NBM.1031 <- ITD.1031NoEventvsNBM$DE$DE %>% rownames() #5,430
+
+# tiff("Yes.1vsYes.0_1031_vsNormalBM_venn.tiff", height = 6, width = 6, units = "in", res=600)
+venn::venn(list(Yes.1.1031=ITD.1.vs.NBM.1031, Yes.0.1031=ITD.0.vs.NBM.1031),
+     zcolor = c("cornflowerblue", "orchid"),
+     cexil = 3, cexsn = 1.8)
+# dev.off()
+
+```
+
+
+```{r}
+ITD.1.vsNBMOnly.0531 <- setdiff(ITD.1.vs.NBM.0531, ITD.0.vs.NBM.0531) #845 genes
+ITD.1.vsNBMOnly.1031 <- setdiff(ITD.1.vs.NBM.1031, ITD.0.vs.NBM.1031) #823 genes
+```
+
+
+```{r}
+ITD.1.vsNBM.BothDataSets <- intersect(ITD.1.vsNBMOnly.0531, ITD.1.vsNBMOnly.1031) #74 genes
+```
+
+
+```{r}
+forVenn2 <- list(Yes.1.0531=ITD.1.vs.NBM.0531,
+                Yes.1.1031=ITD.1.vs.NBM.1031,
+                Yes.0.0531=ITD.0.vs.NBM.0531,
+                Yes.0.1031=ITD.0.vs.NBM.1031)
+
+# tiff("TARGET_AML_1031_0531_FLT3vNormalBM_venn.tiff", height = 10, width = 10, res=600, units = "in")
+venn::venn(forVenn2,
+     zcolor = c("cornflowerblue", "orchid"),
+     cexil = 3, cexsn = 1.8)
+# dev.off()
+```
+
+
+```{r}
+ITDvsNBM.EventDEGs <- formatDEGs(twoGroups_DEGs.res = ITDvsNBM,
+                                 goi = ITD.1.vsNBM.BothDataSets, 
+                                 filter = TRUE)
+
+ITDvsNBM.EventDEGs
+# write.csv(ITDvsNBM.EventDEGs, "TARGET_AML_0531_ITD.withEvent_vs_NormalBM_commonDEGs_10.30.17.csv", row.names = FALSE)
+```
+
+```{r}
+ITD.1031vsNBM.EventDEGs <- formatDEGs(ITD.1031vsNBM, 
+                                      ITD.1.vsNBM.BothDataSets,
+                                      filter = TRUE)
+
+# write.csv(ITD.1031vsNBM.EventDEGs, "TARGET_AML_1031_ITD.withEvent_vs_NormalBM_commonDEGs.csv_10.30.17", row.names = FALSE)
+```
+
+
+#Annotation Heatmap
+
+```{r}
+aHeatmap_custom <- function(CDE, cols, cts,annocolors,geneList){
+  
+  annodf <- CDE[,cols]
+  annodf <- matchMatrix(annodf, cts)
+  
+  # annocolors <- colorCodes_aheatmap(annodf, random = TRUE)
+
+  #phenotype vector 
+  p.AML <- annodf[,1] %>% 
+    set_names(rownames(annodf))
+
+  #dendrograms
+  d.AML <- dge_dendrograms(expData = cts, 
+                              pheno = p.AML,
+                              genelist = geneList,
+                              method = "ward.D2" )
+  
+  #heatmap
+  annotationHeatmap(d.AML$TMMCPM, d.AML$c2, d.AML$c1, annoDF = annodf, annoColors = annocolors)
+  
+  list <- list(annodf=annodf,annocolors=annocolors,pheno=p.AML,dend=d.AML)
+  return(list)
+  
+}
+```
+
+
+```{r}
+BM <- grep("^BM",colnames(cts.0531), value = TRUE)
+forNA <- rep("NBM",5) %>%
+  set_names(fusions.0531)
+
+#CDE
+CDE.NBM.heatmap <- CDE.0531 %>%
+  filter(! grepl("Unknown|No.0|No.1|Yes.0", FLT3.With.Event)) %>%
+  add_row(TARGET.USI.1=grep("^BM",colnames(cts.0531), value = TRUE)) %>%
+  filter(TARGET.USI.1 %in% intersect(TARGET.USI.1,colnames(cts.0531))) %>%
+  select(TARGET.USI.1,fusions.0531) %>%
+  replace_na(as.list(forNA)) %>%
+  column_to_rownames("TARGET.USI.1")
+
+
+#Counts
+cts.NBM <- cts.0531[,intersect(rownames(CDE.NBM.heatmap),colnames(cts.0531))]
+
+
+#colors
+colors.0531.NBM <- list(NPM.mutation=c("No"="turquoise3", "Yes"="blue", "NBM"="black"),
+                    CEBPA.mutation=c("No"="darkblue","Yes"="orchid", "NBM"="black"),
+                    WT1.mutation=c("No"="maroon", "Yes"="cornflowerblue", "NBM"="black"),
+                    NUP98.NSD1=c("otherAML"="darkmagenta","NUP98-NSD1"="navajowhite2", "NBM"="black"),
+                    FLT3.With.Event=c("Yes.1"="deepskyblue1","NBM"="black"))
+
+# "No.1"="saddlebrown"
+# "Yes.0"="green4"
+# tiff("0531_ITD.Event_vs_NormalBM_Heatmap.tiff", height = 10, width = 10, res=600, units = "in")
+NBM.Heatmap <- aHeatmap_custom(CDE=CDE.NBM.heatmap,
+                cols = fusions.0531,
+                cts = cts.NBM,
+                annocolors = colors.0531.NBM,
+                geneList = ITD.1.vsNBM.BothDataSets)
+# dev.off()
+
+```
+
+
+
+```{r}
+#Annotations
+cols <- c("NPM1", "CEBPA","NUP98.NSD1","FLT3.With.Event")
+forNA.1031 <- rep("NBM",4) %>% set_names(cols)
+
+
+#CDE
+CDE.1031.NBM <- combined.CDE.1031 %>%
+  filter(! grepl("No.0|No.1|Yes.0", FLT3.With.Event)) %>%
+  add_row(USI=grep("^BM|^RO",colnames(cts.1031), value = TRUE)) %>%
+  filter(USI %in% intersect(USI,colnames(cts.1031))) %>%
+  select(USI,cols) %>%
+  replace_na(as.list(forNA.1031)) %>%
+  column_to_rownames("USI")
+
+
+#Counts
+cts.1031.NBM <- cts.1031[,intersect(rownames(CDE.1031.NBM), colnames(cts.1031))] 
+
+
+
+#Colors
+colors.1031.NBM <- list(NPM1=c("Negative"="turquoise3", "Positive"="blue", "NBM"="black"),
+                    CEBPA=c("Negative"="darkblue","Positive"="orchid",  "NBM"="black"),
+                    NUP98.NSD1=c("negative"="darkmagenta","positive"="navajowhite2","unknown"="azure4",  "NBM"="black"),
+                    FLT3.With.Event=c("Yes.1"="deepskyblue1",   "NBM"="black"))
+
+# "No.1"="saddlebrown",
+# "Yes.0"="green4",
+
+#Heatmap
+tiff("1031_ITD.Event_vs_NormalBM_Heatmap.tiff", height = 10,width = 10, res=600, units="in")
+heatmap.1031 <- aHeatmap_custom(CDE = CDE.1031.NBM,
+                                cols=cols,
+                                annocolors = colors.1031.NBM,
+                                cts=cts.1031.NBM,
+                                geneList = ITD.1.vsNBM.BothDataSets)
+dev.off()
+
+
+```
+
+
+
+
+#DEGs Found Exclusively in ITD+ with Events compared to both AML and NBM 
+
+```{r}
+ITD.genes <- intersect(ITD.1.BothDataSets, ITD.1.vsNBM.BothDataSets)
+ITD.genes
+```
+
+
+```{r}
+ITDgenes.0531 <- formatDEGs(ITDvsNBM, ITD.genes, filter = TRUE)
+ITDgenes.1031 <- formatDEGs(ITD.1031vsNBM, ITD.genes, filter = TRUE)
+
+# write.csv(ITDgenes.0531, "TARGET_AML_0531_ITD.withEvent_DEGs_commonTo_vsNBM_vsOtherAML.csv")
+# write.csv(ITDgenes.1031, "TARGET_AML_1031_ITD.withEvent_DEGs_commonTo_vsNBM_vsOtherAML.csv")
+```
+
+
+```{r}
+# d.itd.genes 
+```
+
+
+
+#Session Information 
+```{r}
+sessionInfo()
+```
+
